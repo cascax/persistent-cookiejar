@@ -1,10 +1,12 @@
 # cookiejar
 --
-    import "github.com/juju/persistent-cookiejar"
+    import "github.com/cascax/persistent-cookiejar"
 
 Package cookiejar implements an in-memory RFC 6265-compliant http.CookieJar.
 
-This implementation is a fork of net/http/cookiejar which also implements
+This implementation is a fork of github.com/juju/persistent-cookiejar.
+
+The juju/persistent-cookiejar is a fork of net/http/cookiejar which also implements
 methods for dumping the cookies to persistent storage and retrieving them.
 
 ## Usage

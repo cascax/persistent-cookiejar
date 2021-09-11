@@ -5,6 +5,7 @@
 package cookiejar
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -13,10 +14,8 @@ import (
 	"sort"
 	"time"
 
-	"gopkg.in/retry.v1"
-
-	filelock "github.com/juju/go4/lock"
-	"gopkg.in/errgo.v1"
+	"github.com/gofrs/flock"
+	"github.com/pkg/errors"
 )
 
 // Save saves the cookies to the persistent cookie file.
@@ -43,12 +42,12 @@ func (j *Jar) MarshalJSON() ([]byte, error) {
 func (j *Jar) save(now time.Time) error {
 	locked, err := lockFile(lockFileName(j.filename))
 	if err != nil {
-		return errgo.Mask(err)
+		return err
 	}
 	defer locked.Close()
 	f, err := os.OpenFile(j.filename, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
-		return errgo.Mask(err)
+		return err
 	}
 	defer f.Close()
 	// TODO optimization: if the file hasn't changed since we
@@ -62,10 +61,10 @@ func (j *Jar) save(now time.Time) error {
 	}
 	j.deleteExpired(now)
 	if err := f.Truncate(0); err != nil {
-		return errgo.Notef(err, "cannot truncate file")
+		return errors.WithMessage(err, "cannot truncate file")
 	}
 	if _, err := f.Seek(0, 0); err != nil {
-		return errgo.Mask(err)
+		return err
 	}
 	return j.writeTo(f)
 }
@@ -81,7 +80,7 @@ func (j *Jar) load() error {
 	}
 	locked, err := lockFile(lockFileName(j.filename))
 	if err != nil {
-		return errgo.Mask(err)
+		return err
 	}
 	defer locked.Close()
 	f, err := os.Open(j.filename)
@@ -93,7 +92,7 @@ func (j *Jar) load() error {
 	}
 	defer f.Close()
 	if err := j.mergeFrom(f); err != nil {
-		return errgo.Mask(err)
+		return err
 	}
 	return nil
 }
@@ -152,21 +151,16 @@ func lockFileName(path string) string {
 	return path + ".lock"
 }
 
-var attempt = retry.LimitTime(3*time.Second, retry.Exponential{
-	Initial:  100 * time.Microsecond,
-	Factor:   1.5,
-	MaxDelay: 100 * time.Millisecond,
-})
-
-func lockFile(path string) (io.Closer, error) {
-	for a := retry.Start(attempt, nil); a.Next(); {
-		locker, err := filelock.Lock(path)
-		if err == nil {
-			return locker, nil
+func lockFile(path string) (*flock.Flock, error) {
+	lock := flock.New(path)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Microsecond)
+	defer cancel()
+	_, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.New("try lock timeout")
 		}
-		if !a.More() {
-			return nil, errgo.Notef(err, "file locked for too long; giving up")
-		}
+		return nil, err
 	}
-	panic("unreachable")
+	return lock, nil
 }

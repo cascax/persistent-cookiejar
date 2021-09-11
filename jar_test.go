@@ -6,6 +6,8 @@ package cookiejar
 
 import (
 	"fmt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -18,8 +20,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	qt "github.com/frankban/quicktest"
 )
 
 // tNow is the synthetic current time used as now during testing.
@@ -1494,40 +1494,38 @@ var serializeTestCookies = []*http.Cookie{{
 var serializeTestURL, _ = url.Parse("http://example.com/x")
 
 func TestLoadSave(t *testing.T) {
-	c := qt.New(t)
 	d, err := ioutil.TempDir("", "")
-	c.Assert(err, qt.Equals, nil)
+	require.NoError(t, err)
 	defer os.RemoveAll(d)
 	file := filepath.Join(d, "cookies")
 	j := newTestJar(file)
 	j.SetCookies(serializeTestURL, serializeTestCookies)
 	err = j.Save()
-	c.Assert(err, qt.Equals, nil)
+	require.NoError(t, err)
 	_, err = os.Stat(file)
-	c.Assert(err, qt.Equals, nil)
+	require.NoError(t, err)
 	j1 := newTestJar(file)
-	c.Assert(len(j1.entries), qt.Equals, len(serializeTestCookies))
-	c.Assert(j1.entries, qt.DeepEquals, j.entries)
+	assert.Equal(t, len(serializeTestCookies), len(j1.entries))
+	assert.Equal(t, j.entries, j1.entries)
 }
 
 func TestMarshalJSON(t *testing.T) {
-	c := qt.New(t)
 	j := newTestJar("")
 	j.SetCookies(serializeTestURL, serializeTestCookies)
 	// Marshal the cookies.
 	data, err := j.MarshalJSON()
-	c.Assert(err, qt.Equals, nil)
+	require.NoError(t, err)
 	// Save them to disk.
 	d, err := ioutil.TempDir("", "")
-	c.Assert(err, qt.Equals, nil)
+	require.NoError(t, err)
 	defer os.RemoveAll(d)
 	file := filepath.Join(d, "cookies")
 	err = ioutil.WriteFile(file, data, 0600)
-	c.Assert(err, qt.Equals, nil)
+	require.NoError(t, err)
 	// Load cookies from the file.
 	j1 := newTestJar(file)
-	c.Assert(len(j1.entries), qt.Equals, len(serializeTestCookies))
-	c.Assert(j1.entries, qt.DeepEquals, j.entries)
+	assert.Equal(t, len(serializeTestCookies), len(j1.entries))
+	assert.Equal(t, j.entries, j1.entries)
 }
 
 func TestLoadSaveWithNoPersist(t *testing.T) {
