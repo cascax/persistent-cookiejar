@@ -5,13 +5,19 @@
 package cookiejar
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -33,8 +39,12 @@ func (j *Jar) Save() error {
 func (j *Jar) MarshalJSON() ([]byte, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	entries, err := j.allPersistentEntries()
+	if err != nil {
+		return nil, err
+	}
 	// Marshaling entries can never fail.
-	data, _ := json.Marshal(j.allPersistentEntries())
+	data, _ := json.Marshal(entries)
 	return data, nil
 }
 
@@ -115,7 +125,9 @@ func (j *Jar) mergeFrom(r io.Reader) error {
 		log.Printf("warning: discarding cookies in invalid format (error: %v)", err)
 		return nil
 	}
-	j.merge(entries)
+	if err := j.merge(entries); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -123,7 +135,10 @@ func (j *Jar) mergeFrom(r io.Reader) error {
 // as a JSON array.
 func (j *Jar) writeTo(w io.Writer) error {
 	encoder := json.NewEncoder(w)
-	entries := j.allPersistentEntries()
+	entries, err := j.allPersistentEntries()
+	if err != nil {
+		return err
+	}
 	if err := encoder.Encode(entries); err != nil {
 		return err
 	}
@@ -132,17 +147,25 @@ func (j *Jar) writeTo(w io.Writer) error {
 
 // allPersistentEntries returns all the entries in the jar, sorted by primarly by canonical host
 // name and secondarily by path length.
-func (j *Jar) allPersistentEntries() []entry {
+func (j *Jar) allPersistentEntries() ([]entry, error) {
 	var entries []entry
+	var err error
 	for _, submap := range j.entries {
 		for _, e := range submap {
 			if e.Persistent {
+				if len(j.encryptedKey) > 0 {
+					e.EncryptedValue, err = encrypt([]byte(e.Value), j.encryptedKey)
+					if err != nil {
+						return nil, errors.WithMessage(err, "encrypt value error")
+					}
+					e.Value = ""
+				}
 				entries = append(entries, e)
 			}
 		}
 	}
 	sort.Sort(byCanonicalHost{entries})
-	return entries
+	return entries, nil
 }
 
 // lockFileName returns the name of the lock file associated with
@@ -153,9 +176,9 @@ func lockFileName(path string) string {
 
 func lockFile(path string) (*flock.Flock, error) {
 	lock := flock.New(path)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Microsecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	_, err := lock.TryLockContext(ctx, 100*time.Microsecond)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, errors.New("try lock timeout")
@@ -163,4 +186,60 @@ func lockFile(path string) (*flock.Flock, error) {
 		return nil, err
 	}
 	return lock, nil
+}
+
+// encrypt returns the text encrypted by AES-GCM and encoded by base64
+func encrypt(plaintext []byte, key []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", errors.WithMessage(err, "invalid encrypt key")
+	}
+	mode, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", errors.WithMessage(err, "GCM error")
+	}
+	nonce := make([]byte, mode.NonceSize())
+	_, err = io.ReadFull(rand.Reader, nonce)
+	if err != nil {
+		return "", errors.WithMessage(err, "make nonce error")
+	}
+	encrypted := mode.Seal(nil, nonce, plaintext, nil)
+
+	// use base64 encoding nonce and encrypted data
+	dataLen := len(nonce) + len(encrypted)
+	buf := bytes.NewBuffer(make([]byte, 0, base64.StdEncoding.EncodedLen(dataLen)+3))
+	buf.Write([]byte("v01"))
+	encoder := base64.NewEncoder(base64.StdEncoding, buf)
+	_, _ = encoder.Write(nonce)
+	_, _ = encoder.Write(encrypted)
+	err = encoder.Close()
+	if err != nil {
+		return "", errors.WithMessage(err, "base64 encoding error")
+	}
+	return buf.String(), nil
+}
+
+func decrypt(encryptedText string, key []byte) ([]byte, error) {
+	if !strings.HasPrefix(encryptedText, "v01") {
+		return nil, errors.New("invalid value")
+	}
+	encryptedData := make([]byte, base64.StdEncoding.DecodedLen(len(encryptedText)-3))
+	n, err := base64.StdEncoding.Decode(encryptedData, []byte(encryptedText)[3:])
+	if err != nil {
+		return nil, errors.WithMessage(err, "base64 decode error")
+	}
+	encryptedData = encryptedData[:n]
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, errors.New("invalid decrypt key")
+	}
+	mode, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, errors.WithMessage(err, "GCM error")
+	}
+	nonce := encryptedData[:mode.NonceSize()]
+	ciphertext := encryptedData[mode.NonceSize():]
+	decrypted, err := mode.Open(nil, nonce, ciphertext, nil)
+	return decrypted, err
 }

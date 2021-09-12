@@ -71,12 +71,20 @@ type Options struct {
 	// (useful for tests). If this is true, the value of Filename will be
 	// ignored.
 	NoPersist bool
+
+	// EncryptedKey holds the key that cookie's encrypted values used.
+	// The key's length must be 32.
+	EncryptedKey []byte
 }
 
 // Jar implements the http.CookieJar interface from the net/http package.
 type Jar struct {
 	// filename holds the file that the cookies were loaded from.
 	filename string
+
+	// encryptedKey holds the key that the encrypted entry.Value used.
+	// encryptedKey's length must be 32.
+	encryptedKey []byte
 
 	psList PublicSuffixList
 
@@ -111,6 +119,15 @@ func newAtTime(o *Options, now time.Time) (*Jar, error) {
 		jar.psList = publicsuffix.List
 	}
 	if !o.NoPersist {
+		if len(o.EncryptedKey) > 0 {
+			// The EncryptedKey argument is the AES-256 key which size should be 32.
+			if len(o.EncryptedKey) > 32 {
+				return nil, errors.New("encrypted key size too long")
+			}
+			key := make([]byte, 32)
+			copy(key, o.EncryptedKey)
+			jar.encryptedKey = key
+		}
 		if jar.filename = o.Filename; jar.filename == "" {
 			jar.filename = DefaultCookieFile()
 		}
@@ -160,6 +177,10 @@ type entry struct {
 	// when storing/loading cookies) we can still get the correct
 	// jar keys.
 	CanonicalHost string
+
+	// EncryptedValue stores the encrypted Value.
+	// The value will be set when the jar file is read or written.
+	EncryptedValue string
 }
 
 // id returns the domain;path;name triple of e as an id.
@@ -363,13 +384,20 @@ func (j *Jar) RemoveCookie(c *http.Cookie) {
 
 // merge merges all the given entries into j. More recently changed
 // cookies take precedence over older ones.
-func (j *Jar) merge(entries []entry) {
+func (j *Jar) merge(entries []entry) error {
 	for _, e := range entries {
 		if e.CanonicalHost == "" {
 			continue
 		}
 		key := jarKey(e.CanonicalHost, j.psList)
 		id := e.id()
+		if len(j.encryptedKey) > 0 && e.EncryptedValue != "" {
+			data, err := decrypt(e.EncryptedValue, j.encryptedKey)
+			if err != nil {
+				return errors.WithMessage(err, "decrypt ciphertext error")
+			}
+			e.Value = string(data)
+		}
 		submap := j.entries[key]
 		if submap == nil {
 			j.entries[key] = map[string]entry{
@@ -382,6 +410,7 @@ func (j *Jar) merge(entries []entry) {
 			submap[id] = e
 		}
 	}
+	return nil
 }
 
 var expiryRemovalDuration = 24 * time.Hour

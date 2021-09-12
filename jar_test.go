@@ -63,6 +63,20 @@ func newTestJar(path string) *Jar {
 	return jar
 }
 
+// newTestJarWithKey creates an empty Jar with testPSL as the public suffix list.
+func newTestJarWithKey(path, key string) *Jar {
+	jar, err := New(&Options{
+		PublicSuffixList: testPSL{},
+		Filename:         path,
+		NoPersist:        path == "",
+		EncryptedKey:     []byte(key),
+	})
+	if err != nil {
+		panic(err)
+	}
+	return jar
+}
+
 var hasDotSuffixTests = [...]struct {
 	s, suffix string
 }{
@@ -1502,6 +1516,7 @@ func TestLoadSave(t *testing.T) {
 	j.SetCookies(serializeTestURL, serializeTestCookies)
 	err = j.Save()
 	require.NoError(t, err)
+	clearMonotonicClocks(j)
 	_, err = os.Stat(file)
 	require.NoError(t, err)
 	j1 := newTestJar(file)
@@ -1515,6 +1530,7 @@ func TestMarshalJSON(t *testing.T) {
 	// Marshal the cookies.
 	data, err := j.MarshalJSON()
 	require.NoError(t, err)
+	clearMonotonicClocks(j)
 	// Save them to disk.
 	d, err := ioutil.TempDir("", "")
 	require.NoError(t, err)
@@ -1711,6 +1727,47 @@ func TestLoadDifferentPublicSuffixList(t *testing.T) {
 	if err := jar.save(now); err != nil {
 		t.Fatalf("cannot save jar: %v", err)
 	}
+}
+
+func TestLoadSaveWithAES(t *testing.T) {
+	d, err := ioutil.TempDir("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(d)
+	key := "cascax123456"
+	file := filepath.Join(d, "cookies")
+	j := newTestJarWithKey(file, key)
+	j.SetCookies(serializeTestURL, serializeTestCookies)
+	err = j.Save()
+	require.NoError(t, err)
+	clearMonotonicClocks(j)
+	_, err = os.Stat(file)
+	require.NoError(t, err)
+	j1 := newTestJarWithKey(file, key)
+	clearEncryptedValue(j1)
+	assert.Equal(t, len(serializeTestCookies), len(j1.entries))
+	assert.Equal(t, j.entries, j1.entries)
+}
+
+func TestMarshalJSONWithAES(t *testing.T) {
+	key := "cascax123456"
+	j := newTestJarWithKey("", key)
+	j.SetCookies(serializeTestURL, serializeTestCookies)
+	// Marshal the cookies.
+	data, err := j.MarshalJSON()
+	require.NoError(t, err)
+	clearMonotonicClocks(j)
+	// Save them to disk.
+	d, err := ioutil.TempDir("", "")
+	require.NoError(t, err)
+	defer os.RemoveAll(d)
+	file := filepath.Join(d, "cookies")
+	err = ioutil.WriteFile(file, data, 0600)
+	require.NoError(t, err)
+	// Load cookies from the file.
+	j1 := newTestJarWithKey(file, key)
+	clearEncryptedValue(j1)
+	assert.Equal(t, len(serializeTestCookies), len(j1.entries))
+	assert.Equal(t, j.entries, j1.entries)
 }
 
 func TestLockFile(t *testing.T) {
@@ -2172,4 +2229,28 @@ func cookiesEqual(a, b *http.Cookie) bool {
 		a.Expires.Equal(b.Expires) &&
 		a.HttpOnly == b.HttpOnly &&
 		a.Secure == b.Secure
+}
+
+// clearMonotonicClocks clear time.Time's Monotonic Clock.
+// Monotonic Clock will affect the judgment of equality.
+// https://pkg.go.dev/time#hdr-Monotonic_Clocks
+func clearMonotonicClocks(j *Jar) {
+	for _, mv := range j.entries {
+		for key, entry := range mv {
+			entry.Expires = entry.Expires.Round(0)
+			entry.Creation = entry.Creation.Round(0)
+			entry.LastAccess = entry.LastAccess.Round(0)
+			entry.Updated = entry.Updated.Round(0)
+			mv[key] = entry
+		}
+	}
+}
+
+func clearEncryptedValue(j *Jar) {
+	for _, mv := range j.entries {
+		for key, entry := range mv {
+			entry.EncryptedValue = ""
+			mv[key] = entry
+		}
+	}
 }
