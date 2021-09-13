@@ -6,12 +6,12 @@ package cookiejar
 
 import (
 	"bytes"
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/cascax/persistent-cookiejar/internal"
 	"io"
 	"log"
 	"os"
@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/pkg/errors"
 )
 
@@ -50,7 +49,7 @@ func (j *Jar) MarshalJSON() ([]byte, error) {
 
 // save is like Save but takes the current time as a parameter.
 func (j *Jar) save(now time.Time) error {
-	locked, err := lockFile(lockFileName(j.filename))
+	locked, err := internal.LockFile(j.filename)
 	if err != nil {
 		return err
 	}
@@ -88,7 +87,7 @@ func (j *Jar) load() error {
 		// to acquire the lock.
 		return nil
 	}
-	locked, err := lockFile(lockFileName(j.filename))
+	locked, err := internal.LockFile(j.filename)
 	if err != nil {
 		return err
 	}
@@ -166,26 +165,6 @@ func (j *Jar) allPersistentEntries() ([]entry, error) {
 	}
 	sort.Sort(byCanonicalHost{entries})
 	return entries, nil
-}
-
-// lockFileName returns the name of the lock file associated with
-// the given path.
-func lockFileName(path string) string {
-	return path + ".lock"
-}
-
-func lockFile(path string) (*flock.Flock, error) {
-	lock := flock.New(path)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_, err := lock.TryLockContext(ctx, 100*time.Microsecond)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, errors.New("try lock timeout")
-		}
-		return nil, err
-	}
-	return lock, nil
 }
 
 // encrypt returns the text encrypted by AES-GCM and encoded by base64
